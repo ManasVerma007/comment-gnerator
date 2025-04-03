@@ -25,6 +25,7 @@ function extractCommentsCommand(context) {
 
       const document = editor.document;
       const comments = extractCommentsFromAST(document.getText());
+      console.log("hi there I got it to here boo")
 
       if (!panel) {
         panel = vscode.window.createWebviewPanel(
@@ -47,6 +48,7 @@ function extractCommentsCommand(context) {
       }
 
       panel.webview.html = generateWebviewContent(comments);
+      console.log("YEP boo i was here as well")
 
       // Clean up any existing watcher before creating a new one
       if (activeWatcher) {

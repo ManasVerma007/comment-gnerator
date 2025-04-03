@@ -1,24 +1,32 @@
 const { parseCodeToAST } = require('./astParser');
 
 /**
- * Extract code structure and comments from the AST.
- * @param {string} code - The JavaScript code.
- * @returns {Array} Extracted code elements with associated comments.
+ * Safely extract comments from AST
+ * @param {string} code - The JavaScript code
+ * @returns {Array} Extracted code elements with associated comments
  */
 function extractCommentsFromAST(code) {
-  const ast = parseCodeToAST(code);
-  
-  // Store all comments for later association
-  const comments = ast.comments || [];
-  console.log('All comments:', comments); 
-  console.log('AST Body:', ast.body);
-  const codeElements = [];
-  
-  // Process the AST body
-  traverseAST(ast.body, comments, codeElements);
-  // console.log('Extracted code elements:', codeElements);
-  
-  return codeElements.length > 0 ? codeElements : comments;
+  try {
+    const ast = parseCodeToAST(code);
+    
+    // Store all comments for later association
+    const comments = ast.comments || [];
+    const codeElements = [];
+    console.log('comments are here ', comments);
+    
+    // Process the AST body
+    traverseAST(ast.body, comments, codeElements);
+    console.log("code - elements", codeElements);
+    
+    // Safety check - ensure all elements in codeElements have a type property
+    const validElements = codeElements.filter(element => element && element.type);
+    
+    return validElements.length > 0 ? validElements : comments;
+  } catch (error) {
+    console.error("Error parsing code:", error);
+    // Return empty array on error to avoid crashing
+    return [];
+  }
 }
 
 /**
@@ -26,8 +34,9 @@ function extractCommentsFromAST(code) {
  * @param {Array} nodes - AST nodes to traverse
  * @param {Array} comments - All comments from the AST
  * @param {Array} codeElements - Array to store extracted code elements
+ * @param {Object} options - Options for traversal (e.g., current scope)
  */
-function traverseAST(nodes, comments, codeElements) {
+function traverseAST(nodes, comments, codeElements, options = { inFunctionScope: false }) {
   if (!nodes || !Array.isArray(nodes)) return;
   
   nodes.forEach(node => {
@@ -36,10 +45,18 @@ function traverseAST(nodes, comments, codeElements) {
     switch (node.type) {
       case 'FunctionDeclaration':
         processFunctionDeclaration(node, comments, codeElements);
-        break;
-      
+        
+        // For function body, set the inFunctionScope flag to true
+        if (node.body && node.body.body) {
+          traverseAST(node.body.body, comments, codeElements, { inFunctionScope: true });
+        }
+        return; // Skip further processing of this node
+        
       case 'VariableDeclaration':
-        processVariableDeclaration(node, comments, codeElements);
+        // Only process variable declarations at the root scope, not inside functions
+        if (!options.inFunctionScope) {
+          processVariableDeclaration(node, comments, codeElements);
+        }
         break;
       
       case 'ClassDeclaration':
@@ -50,22 +67,46 @@ function traverseAST(nodes, comments, codeElements) {
         if (node.expression.type === 'AssignmentExpression') {
           processAssignmentExpression(node.expression, comments, codeElements);
         }
-        break;
+        break;      
       
       case 'ExportNamedDeclaration':
       case 'ExportDefaultDeclaration':
         if (node.declaration) {
-          traverseAST([node.declaration], comments, codeElements);
+          traverseAST([node.declaration], comments, codeElements, options);
         }
         break;
     }
     
     // Check for nested blocks that might contain more declarations
     if (node.body && Array.isArray(node.body)) {
-      traverseAST(node.body, comments, codeElements);
+      // Pass the current scope information to nested traversals
+      traverseAST(node.body, comments, codeElements, options);
     } else if (node.body && node.body.body) {
-      traverseAST(node.body.body, comments, codeElements);
+      // For bodies within bodies (like in if statements, loops, etc.)
+      traverseAST(node.body.body, comments, codeElements, options);
     }
+  });
+}
+
+/**
+ * Extract inline comments from a function body
+ * @param {Object} node - AST node with a body property
+ * @param {Array} allComments - All comments from the AST
+ * @returns {Array} Comments found within the function body
+ */
+function extractInlineComments(node, allComments) {
+  if (!node.body || !node.body.loc) {
+    return [];
+  }
+  
+  // Get the range of the function body
+  const bodyStartLine = node.body.loc.start.line;
+  const bodyEndLine = node.body.loc.end.line;
+  
+  // Find all comments that are within the function body
+  return allComments.filter(comment => {
+    return comment.loc.start.line > bodyStartLine && 
+           comment.loc.end.line < bodyEndLine;
   });
 }
 
@@ -76,28 +117,12 @@ function traverseAST(nodes, comments, codeElements) {
  * @param {Array} codeElements - Array to store extracted code elements
  */
 function processFunctionDeclaration(node, comments, codeElements) {
-  // Print all available comments passed to this function
-  console.log('--------------- FUNCTION DECLARATION ---------------');
-  console.log(`Function: ${node.id ? node.id.name : 'anonymous'}`);
-  console.log('All available comments:', comments.map(c => ({
-    value: c.value,
-    start: c.loc.start.line,
-    end: c.loc.end.line
-  })));
-  
   const associatedComments = findAssociatedComments(node, comments);
-  
-  // Print comments that were associated with this function
-  console.log('Associated comments:', associatedComments.map(c => ({
-    value: c.value,
-    start: c.loc.start.line,
-    end: c.loc.end.line
-  })));
 
   const functionElement = {
     type: 'function',
     name: node.id ? node.id.name : 'anonymous',
-    params: node.params.map(param => param.name || 'unnamed'),
+    params: node.params.map(param => extractParamName(param)),
     location: node.loc,
     comments: associatedComments
   };
@@ -106,20 +131,70 @@ function processFunctionDeclaration(node, comments, codeElements) {
   const jsdoc = extractJSDocInfo(functionElement.comments);
   if (jsdoc) {
     functionElement.jsdoc = jsdoc;
-    console.log('Extracted JSDoc:', jsdoc);
-  } else {
-    console.log('No JSDoc found for this function');
   }
   
-  console.log('Function element:', {
-    type: functionElement.type,
-    name: functionElement.name,
-    params: functionElement.params,
-    commentCount: functionElement.comments.length
-  });
-  console.log('--------------------------------------------------');
+  // Extract inline comments from function body
+  const inlineComments = extractInlineComments(node, comments);
+  if (inlineComments.length > 0) {
+    functionElement.inlineComments = inlineComments;
+  }
+  
+  // Extract local variables declared in the function body
+  if (node.body && node.body.body) {
+    const localVariables = extractLocalVariables(node.body.body);
+    if (localVariables.length > 0) {
+      functionElement.localVariables = localVariables;
+    }
+  }
 
   codeElements.push(functionElement);
+}
+
+/**
+ * Extract local variables from function body nodes
+ * @param {Array} bodyNodes - Function body nodes
+ * @returns {Array} Array of local variable objects
+ */
+function extractLocalVariables(bodyNodes) {
+  const variables = [];
+  
+  bodyNodes.forEach(node => {
+    if (node.type === 'VariableDeclaration') {
+      node.declarations.forEach(declaration => {
+        variables.push({
+          name: declaration.id.name,
+          kind: node.kind, // 'var', 'let', or 'const'
+          location: declaration.loc || node.loc
+        });
+      });
+    }
+  });
+  
+  return variables;
+}
+
+/**
+ * Extract parameter name, handling different parameter types
+ * @param {Object} param - Parameter node from AST
+ * @returns {string} Parameter name
+ */
+function extractParamName(param) {
+  if (!param) return 'unnamed';
+  
+  switch (param.type) {
+    case 'Identifier':
+      return param.name;
+    case 'AssignmentPattern': // Default parameters
+      return param.left.name;
+    case 'RestElement': // Rest parameters
+      return `...${param.argument.name}`;
+    case 'ObjectPattern': // Destructured object
+      return '{' + param.properties.map(p => p.key.name).join(', ') + '}';
+    case 'ArrayPattern': // Destructured array
+      return '[' + param.elements.map(e => e ? e.name : '').join(', ') + ']';
+    default:
+      return 'unnamed';
+  }
 }
 
 /**
@@ -134,14 +209,22 @@ function processVariableDeclaration(node, comments, codeElements) {
       type: 'variable',
       kind: node.kind, // 'var', 'let', or 'const'
       name: declaration.id.name,
-      location: declaration.loc,
+      location: declaration.loc || node.loc,
       comments: findAssociatedComments(node, comments)
     };
 
     // Check if it's a function expression
     if (declaration.init && (declaration.init.type === 'FunctionExpression' || declaration.init.type === 'ArrowFunctionExpression')) {
       variableElement.isFunction = true;
-      variableElement.params = declaration.init.params.map(param => param.name || 'unnamed');
+      variableElement.params = declaration.init.params.map(param => extractParamName(param));
+      
+      // Extract inline comments if it's a function expression with block body
+      if (declaration.init.body && declaration.init.body.type === 'BlockStatement') {
+        const inlineComments = extractInlineComments(declaration.init, comments);
+        if (inlineComments.length > 0) {
+          variableElement.inlineComments = inlineComments;
+        }
+      }
     }
     
     // Extract JSDoc info if available
@@ -149,8 +232,6 @@ function processVariableDeclaration(node, comments, codeElements) {
     if (jsdoc) {
       variableElement.jsdoc = jsdoc;
     }
-
-    // console.log("variableElemets", variableElement)
     
     codeElements.push(variableElement);
   });
@@ -176,19 +257,32 @@ function processClassDeclaration(node, comments, codeElements) {
     node.body.body.forEach(methodNode => {
       if (methodNode.type === 'MethodDefinition') {
         const method = {
-          name: methodNode.key.name,
+          name: methodNode.key.name || (methodNode.key.type === 'Literal' ? methodNode.key.value : 'unnamed'),
           kind: methodNode.kind, // 'constructor', 'method', 'get', or 'set'
           static: methodNode.static,
-          params: methodNode.value.params.map(param => param.name || 'unnamed'),
-          comments: findAssociatedComments(methodNode, comments)
+          params: methodNode.value.params.map(param => extractParamName(param)),
+          comments: findAssociatedComments(methodNode, comments),
+          location: methodNode.loc
         };
+        
+        // Extract inline comments from method body
+        const inlineComments = extractInlineComments(methodNode.value, comments);
+        if (inlineComments.length > 0) {
+          method.inlineComments = inlineComments;
+        }
+        
+        // Extract JSDoc info for the method if available
+        const jsdoc = extractJSDocInfo(method.comments);
+        if (jsdoc) {
+          method.jsdoc = jsdoc;
+        }
         
         classElement.methods.push(method);
       }
     });
   }
   
-  // Extract JSDoc info if available
+  // Extract JSDoc info for the class if available
   const jsdoc = extractJSDocInfo(classElement.comments);
   if (jsdoc) {
     classElement.jsdoc = jsdoc;
@@ -210,10 +304,30 @@ function processAssignmentExpression(node, comments, codeElements) {
     if (object === 'module' || object === 'exports') {
       const exportElement = {
         type: 'export',
-        name: node.left.property ? node.left.property.name : 'default',
+        name: node.left.property ? 
+              (node.left.property.type === 'Identifier' ? node.left.property.name : 'default') : 
+              'default',
         location: node.loc,
         comments: findAssociatedComments(node, comments)
       };
+      
+      // Check if the right side is a function expression
+      if (node.right.type === 'FunctionExpression' || node.right.type === 'ArrowFunctionExpression') {
+        exportElement.isFunction = true;
+        exportElement.params = node.right.params.map(param => extractParamName(param));
+        
+        // Extract inline comments from function body
+        const inlineComments = extractInlineComments(node.right, comments);
+        if (inlineComments.length > 0) {
+          exportElement.inlineComments = inlineComments;
+        }
+      }
+      
+      // Extract JSDoc info if available
+      const jsdoc = extractJSDocInfo(exportElement.comments);
+      if (jsdoc) {
+        exportElement.jsdoc = jsdoc;
+      }
       
       codeElements.push(exportElement);
     }
@@ -226,13 +340,11 @@ function processAssignmentExpression(node, comments, codeElements) {
  * @param {Array} comments - All comments from the AST
  * @returns {Array} Associated comments
  */
-function findAssociatedComments(node, comments){
-
+function findAssociatedComments(node, comments) {
   if (!node.loc || !comments.length) return [];
   
   // Find all comments that end before the node starts
   // and are not too far away (within 2 lines)
-  console.log(node.loc.start.line, node.loc.end.line)
   return comments.filter(comment => {
     return comment.loc.end.line <= node.loc.start.line &&
            node.loc.start.line - comment.loc.end.line <= 2;
@@ -269,7 +381,7 @@ function extractJSDocInfo(comments) {
   }
   
   // Extract @param tags
-  const paramMatches = jsdocComment.matchAll(/@param\s+(?:{([^}]*)})?\s*(?:\[([^\]]*)\]|(\S+))\s*-?\s*([\s\S]*?)(?=@|\*\/|$)/g);
+  const paramMatches = Array.from(jsdocComment.matchAll(/@param\s+(?:{([^}]*)})?\s*(?:\[([^\]]*)\]|(\S+))\s*-?\s*([\s\S]*?)(?=@|\*\/|$)/g));
   for (const match of paramMatches) {
     jsdoc.params.push({
       type: match[1] || '',
@@ -288,9 +400,30 @@ function extractJSDocInfo(comments) {
   }
   
   // Extract @example tags
-  const exampleMatches = jsdocComment.matchAll(/@example\s*([\s\S]*?)(?=@|\*\/|$)/g);
+  const exampleMatches = Array.from(jsdocComment.matchAll(/@example\s*([\s\S]*?)(?=@|\*\/|$)/g));
   for (const match of exampleMatches) {
     jsdoc.examples.push(match[1].trim());
+  }
+  
+  // Extract @throws tags
+  const throwsMatches = Array.from(jsdocComment.matchAll(/@throws?\s+(?:{([^}]*)})?\s*-?\s*([\s\S]*?)(?=@|\*\/|$)/g));
+  if (throwsMatches.length > 0) {
+    jsdoc.throws = throwsMatches.map(match => ({
+      type: match[1] || '',
+      description: (match[2] || '').trim()
+    }));
+  }
+  
+  // Extract @deprecated tag
+  const deprecatedMatch = jsdocComment.match(/@deprecated\s*([\s\S]*?)(?=@|\*\/|$)/);
+  if (deprecatedMatch) {
+    jsdoc.deprecated = deprecatedMatch[1].trim();
+  }
+  
+  // Extract @since tag
+  const sinceMatch = jsdocComment.match(/@since\s*([\s\S]*?)(?=@|\*\/|$)/);
+  if (sinceMatch) {
+    jsdoc.since = sinceMatch[1].trim();
   }
   
   return jsdoc;
